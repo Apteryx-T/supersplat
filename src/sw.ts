@@ -28,6 +28,7 @@ const cacheUrls = [
 
 self.addEventListener('install', (event) => {
     console.log(`installing v${appVersion}`);
+    self.skipWaiting();
 
     // create cache for current version
     event.waitUntil(
@@ -38,20 +39,29 @@ self.addEventListener('install', (event) => {
     );
 });
 
-self.addEventListener('activate', () => {
+self.addEventListener('activate', (event) => {
     console.log(`activating v${appVersion}`);
 
     // delete the old caches once this one is activated
-    caches.keys().then((names) => {
-        for (const name of names) {
-            if (name !== cacheName) {
-                caches.delete(name);
+    event.waitUntil(
+        caches.keys().then(async (names) => {
+            for (const name of names) {
+                if (name !== cacheName) {
+                    await caches.delete(name);
+                }
             }
-        }
-    });
+            await self.clients.claim();
+        })
+    );
 });
 
 self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+        event.respondWith(fetch(event.request));
+        return;
+    }
+
     event.respondWith(
         caches.match(event.request)
         .then(response => response ?? fetch(event.request))

@@ -64,7 +64,7 @@ const registerEditorEvents = (events: Events, editHistory: EditHistory, scene: S
     });
 
     events.function('scene.dirty', () => {
-        return editHistory.cursor !== lastExportCursor;
+        return editHistory.cursor !== lastExportCursor || events.invoke('spatialUi.dirty');
     });
 
     events.on('doc.saved', () => {

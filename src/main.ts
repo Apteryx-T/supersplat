@@ -17,6 +17,7 @@ import { getSceneConfig } from './scene-config';
 import { registerSelectionEvents } from './selection';
 import { registerSequenceEvents } from './sequence';
 import { ShortcutManager } from './shortcut-manager';
+import { SpatialUI } from './spatial-ui';
 import { registerTimelineEvents } from './timeline';
 import { BoxSelection } from './tools/box-selection';
 import { BrushSelection } from './tools/brush-selection';
@@ -252,6 +253,10 @@ const main = async () => {
     toolManager.register('measure', new MeasureTool(events, scene, editorUI.toolsContainer.dom, editorUI.canvasContainer));
 
     const boundDimensionsOverlay = new BoundDimensionsOverlay(events, scene, editorUI.canvasContainer);
+
+    // MR UI Generator integration. Spatial widgets are DOM elements anchored to
+    // world coordinates, so they remain interactive while tracking the 3D scene.
+    const spatialUI = new SpatialUI(events, scene, editorUI.canvasContainer.dom);
 
     editorUI.toolsContainer.dom.appendChild(maskCanvas);
 

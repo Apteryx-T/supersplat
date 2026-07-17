@@ -62,6 +62,8 @@ type MrDocument = {
 const supportedTypes = new Set<SpatialNodeType>(['button', 'dialog', 'card', 'hotspot', 'tool', 'toolbar']);
 const supportedThemes = new Set<SpatialTheme>(['glass', 'bold', 'viral', 'editorial', 'roomtour']);
 const defaultScreenScale = 1.6;
+const defaultCreationDistance = 3;
+const maxVisibleDistanceLimit = 20;
 const screenEdgePadding = 200;
 const workPosition = new Vec3();
 const workScreen = new Vec3();
@@ -74,7 +76,7 @@ const normalizeOpacity = (value: unknown, fallback = 1) => {
 };
 const normalizeDistance = (value: unknown, fallback: number) => {
     const number = Number(value);
-    return Number.isFinite(number) && number > 0 ? number : fallback;
+    return Number.isFinite(number) && number >= 0 ? number : fallback;
 };
 const normalizeMinDistance = (value: unknown, fallback: number) => {
     const number = Number(value);
@@ -156,13 +158,16 @@ class SpatialUI {
     }
 
     private defaultViewSettings() {
-        const focal = this.scene.camera.focalPoint;
-        const distance = Math.max(0.1, focal.distance(this.scene.camera.position));
-        const perspectiveScale = Math.max(0.000001, this.scene.camera.sceneRadius / distance * 1.5);
+        const camera = this.scene.camera;
+        const position = new Vec3().copy(camera.position)
+        .add(new Vec3().copy(camera.forward).mulScalar(defaultCreationDistance));
+        const perspectiveScale = Math.max(
+            0.000001, camera.sceneRadius / defaultCreationDistance * 1.5
+        );
         return {
-            position: [focal.x, focal.y, focal.z] as [number, number, number],
+            position: [position.x, position.y, position.z] as [number, number, number],
             scale: defaultScreenScale / perspectiveScale,
-            minVisibleDistance: 2,
+            minVisibleDistance: 1.5,
             maxVisibleDistance: 5
         };
     }
@@ -543,25 +548,25 @@ class SpatialUI {
         const maxDistance = document.createElement('input');
         const minDistanceNumber = document.createElement('input');
         const maxDistanceNumber = document.createElement('input');
-        const distanceMax = Math.max(this.scene.camera.sceneRadius * 10, node.maxVisibleDistance * 2, 1);
-        const distanceStep = Math.max(distanceMax / 200, 0.01);
+        const distanceMax = maxVisibleDistanceLimit;
+        const distanceStep = 0.1;
         minDistance.type = 'range';
         minDistance.min = '0';
-        minDistance.max = String(node.maxVisibleDistance);
+        minDistance.max = String(distanceMax);
         minDistance.step = String(distanceStep);
-        minDistance.value = String(clamp(node.minVisibleDistance, 0, node.maxVisibleDistance));
+        minDistance.value = String(clamp(node.minVisibleDistance, 0, distanceMax));
         maxDistance.type = 'range';
-        maxDistance.min = String(distanceStep);
+        maxDistance.min = '0';
         maxDistance.max = String(distanceMax);
         maxDistance.step = String(distanceStep);
-        maxDistance.value = String(clamp(node.maxVisibleDistance, distanceStep, distanceMax));
+        maxDistance.value = String(clamp(node.maxVisibleDistance, 0, distanceMax));
         minDistanceNumber.type = 'number';
         minDistanceNumber.min = '0';
-        minDistanceNumber.max = String(node.maxVisibleDistance);
+        minDistanceNumber.max = String(distanceMax);
         minDistanceNumber.step = '0.01';
         minDistanceNumber.value = Number(minDistance.value).toFixed(2);
         maxDistanceNumber.type = 'number';
-        maxDistanceNumber.min = String(distanceStep);
+        maxDistanceNumber.min = '0';
         maxDistanceNumber.max = String(distanceMax);
         maxDistanceNumber.step = '0.01';
         maxDistanceNumber.value = Number(maxDistance.value).toFixed(2);
@@ -606,9 +611,9 @@ class SpatialUI {
             node.borderOpacity = Number(borderOpacity.input.value) / 100;
             node.maxVisibleDistance = Number(maxDistance.value);
             node.minVisibleDistance = Math.min(Number(minDistance.value), node.maxVisibleDistance);
-            minDistance.max = String(node.maxVisibleDistance);
+            minDistance.max = String(distanceMax);
             minDistance.value = String(node.minVisibleDistance);
-            minDistanceNumber.max = String(node.maxVisibleDistance);
+            minDistanceNumber.max = String(distanceMax);
             minDistanceNumber.value = node.minVisibleDistance.toFixed(2);
             maxDistanceNumber.value = node.maxVisibleDistance.toFixed(2);
             [backgroundOpacity, textOpacity, borderOpacity].forEach((control) => {
@@ -635,7 +640,7 @@ class SpatialUI {
             update();
         });
         maxDistanceNumber.addEventListener('input', () => {
-            maxDistance.value = String(clamp(Number(maxDistanceNumber.value) || distanceStep, distanceStep, distanceMax));
+            maxDistance.value = String(clamp(Number(maxDistanceNumber.value) || 0, 0, distanceMax));
             update();
         });
         theme.addEventListener('change', update);
@@ -766,7 +771,9 @@ class SpatialUI {
                 textOpacity: normalizeOpacity(raw.textOpacity, legacyOpacity),
                 borderOpacity: normalizeOpacity(raw.borderOpacity, legacyOpacity),
                 minVisibleDistance: normalizeMinDistance(raw.minVisibleDistance, defaults.minVisibleDistance),
-                maxVisibleDistance: normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance),
+                maxVisibleDistance: clamp(
+                    normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance), 0, maxVisibleDistanceLimit
+                ),
                 theme: supportedThemes.has(raw.theme) ? raw.theme : 'glass',
                 visible: raw.visible !== false,
                 open: raw.type === 'dialog'
@@ -817,7 +824,9 @@ class SpatialUI {
                 textOpacity: normalizeOpacity((raw.textOpacity ?? 100) / 100),
                 borderOpacity: normalizeOpacity((raw.borderOpacity ?? 100) / 100),
                 minVisibleDistance: normalizeMinDistance(raw.minVisibleDistance, defaults.minVisibleDistance),
-                maxVisibleDistance: normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance),
+                maxVisibleDistance: clamp(
+                    normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance), 0, maxVisibleDistanceLimit
+                ),
                 visible: raw.visible !== false,
                 theme,
                 eyebrow: raw.eyebrow,

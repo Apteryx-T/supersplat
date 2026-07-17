@@ -14,7 +14,7 @@
 .spatial-ui-toggle {
     position: absolute;
     right: 16px;
-    top: 64px;
+    top: 152px;
     min-width: 92px;
     height: 38px;
     padding: 0 16px;
@@ -39,9 +39,9 @@
 #spatial-ui-panel {
     position: absolute;
     right: 16px;
-    top: 112px;
+    top: 200px;
     width: 330px;
-    max-height: calc(100% - 150px);
+    max-height: calc(100% - 216px);
     padding: 16px;
     color: rgba(255, 255, 255, 0.92);
     border: 1px solid rgba(255, 255, 255, 0.16);

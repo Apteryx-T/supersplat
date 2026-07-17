@@ -62,6 +62,7 @@ type MrDocument = {
 const supportedTypes = new Set<SpatialNodeType>(['button', 'dialog', 'card', 'hotspot', 'tool', 'toolbar']);
 const supportedThemes = new Set<SpatialTheme>(['glass', 'bold', 'viral', 'editorial', 'roomtour']);
 const defaultScreenScale = 1.6;
+const screenEdgePadding = 200;
 const workPosition = new Vec3();
 const workScreen = new Vec3();
 const workOffset = new Vec3();
@@ -202,7 +203,7 @@ class SpatialUI {
             body: type === 'dialog' ? '这是固定在高斯场景坐标中的交互弹窗。' :
                 type === 'card' ? '南向采光 · 开放式客餐厅 · 精装' : undefined,
             meta: type === 'card' ? '274㎡  ·  4室2厅  ·  ¥2750万' : undefined,
-            open: false
+            open: type === 'dialog'
         };
 
         return node;
@@ -450,16 +451,24 @@ class SpatialUI {
             this.scene.camera.worldToScreen(workPosition, workScreen);
             workOffset.sub2(workPosition, cameraPosition);
             const inFront = workOffset.dot(cameraForward) > 0;
-            const onScreen = workScreen.x > -0.15 && workScreen.x < 1.15 && workScreen.y > -0.15 && workScreen.y < 1.15;
             const distance = Math.max(0.001, workOffset.length());
             const perspectiveScale = this.scene.camera.sceneRadius / distance * 1.5;
-            const withinDistance = this.editorOpen ||
-                (distance >= node.minVisibleDistance && distance <= node.maxVisibleDistance);
-            const shouldShow = node.visible && inFront && onScreen && withinDistance;
+            const spatialScale = node.scale * perspectiveScale;
+            const screenX = workScreen.x * width;
+            const screenY = workScreen.y * height;
+            const horizontalInset = element.offsetWidth * spatialScale * 0.5 + screenEdgePadding;
+            const verticalInset = element.offsetHeight * spatialScale * 0.5 + screenEdgePadding;
+            const withinScreenSafeArea = screenX >= horizontalInset && screenX <= width - horizontalInset &&
+                screenY >= verticalInset && screenY <= height - verticalInset;
+            // Visibility distance is a runtime property of the spatial component.
+            // Keep applying it while the editor is open so camera previews match
+            // the final result instead of forcing every component to stay visible.
+            const withinDistance = distance >= node.minVisibleDistance && distance <= node.maxVisibleDistance;
+            const shouldShow = node.visible && inFront && withinScreenSafeArea && withinDistance;
             element.classList.toggle('spatial-ui-visibility-hidden', !shouldShow);
-            element.style.left = `${workScreen.x * width}px`;
-            element.style.top = `${workScreen.y * height}px`;
-            element.style.setProperty('--spatial-scale', `${node.scale * perspectiveScale}`);
+            element.style.left = `${screenX}px`;
+            element.style.top = `${screenY}px`;
+            element.style.setProperty('--spatial-scale', `${spatialScale}`);
             element.style.zIndex = `${clamp(Math.round(10000 / distance), 1, 9999)}`;
         }
     }
@@ -760,7 +769,7 @@ class SpatialUI {
                 maxVisibleDistance: normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance),
                 theme: supportedThemes.has(raw.theme) ? raw.theme : 'glass',
                 visible: raw.visible !== false,
-                open: false
+                open: raw.type === 'dialog'
             };
             node.minVisibleDistance = Math.min(node.minVisibleDistance, node.maxVisibleDistance);
             this.addNode(node, false);
@@ -814,7 +823,7 @@ class SpatialUI {
                 eyebrow: raw.eyebrow,
                 body: raw.cardBody,
                 meta,
-                open: false
+                open: raw.type === 'dialog'
             };
             node.minVisibleDistance = Math.min(node.minVisibleDistance, node.maxVisibleDistance);
             imported.push(node);

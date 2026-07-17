@@ -7,6 +7,7 @@ import { registerDocEvents } from './doc';
 import { EditHistory } from './edit-history';
 import { registerEditorEvents } from './editor';
 import { Events } from './events';
+import { FurniturePlacement } from './furniture-placement';
 import { initFileHandler } from './file-handler';
 import { registerIframeApi } from './iframe-api';
 import { registerPreferences } from './preferences';
@@ -257,6 +258,7 @@ const main = async () => {
     // MR UI Generator integration. Spatial widgets are DOM elements anchored to
     // world coordinates, so they remain interactive while tracking the 3D scene.
     const spatialUI = new SpatialUI(events, scene, editorUI.canvasContainer.dom);
+    const furniturePlacement = new FurniturePlacement(events, scene, editorUI.canvasContainer.dom);
 
     editorUI.toolsContainer.dom.appendChild(maskCanvas);
 

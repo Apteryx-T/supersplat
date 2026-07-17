@@ -240,6 +240,12 @@ class SpatialUI {
             button.dataset.addSpatialUi = type;
             addGrid.appendChild(button);
         });
+        const furnitureButton = makeButton('▰ 家具摆放', 'spatial-ui-furniture-entry');
+        furnitureButton.addEventListener('click', () => {
+            this.setEditorOpen(false);
+            this.events.fire('furniture.open');
+        });
+        addGrid.appendChild(furnitureButton);
 
         const io = document.createElement('div');
         io.className = 'spatial-ui-io';

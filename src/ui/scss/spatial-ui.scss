@@ -11,6 +11,114 @@
     font-family: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
+.spatial-ui-mobile-preview {
+    position: absolute;
+    z-index: 10000;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    pointer-events: none;
+    font-family: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-serif;
+
+    &[hidden] {
+        display: none;
+    }
+}
+
+.spatial-ui-mobile-frame {
+    position: relative;
+    width: min(calc(100% - 48px), calc(56.25vh - 45px));
+    min-width: 220px;
+    aspect-ratio: 9 / 16;
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: 24px;
+    box-shadow: 0 0 0 9999px rgba(4, 7, 12, 0.58), 0 20px 70px rgba(0, 0, 0, 0.32);
+    box-sizing: border-box;
+
+    &::before {
+        position: absolute;
+        top: 9px;
+        left: 50%;
+        width: 46px;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.68);
+        content: '';
+        transform: translateX(-50%);
+    }
+
+    .corner {
+        position: absolute;
+        width: 18px;
+        height: 18px;
+        border-color: #ffad42;
+        border-style: solid;
+        pointer-events: none;
+    }
+
+    .top-left {
+        top: -2px;
+        left: -2px;
+        border-width: 3px 0 0 3px;
+        border-radius: 24px 0 0;
+    }
+
+    .top-right {
+        top: -2px;
+        right: -2px;
+        border-width: 3px 3px 0 0;
+        border-radius: 0 24px 0 0;
+    }
+
+    .bottom-left {
+        bottom: -2px;
+        left: -2px;
+        border-width: 0 0 3px 3px;
+        border-radius: 0 0 0 24px;
+    }
+
+    .bottom-right {
+        right: -2px;
+        bottom: -2px;
+        border-width: 0 3px 3px 0;
+        border-radius: 0 0 24px;
+    }
+}
+
+.spatial-ui-mobile-resolution {
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    padding: 4px 9px;
+    color: rgba(255, 255, 255, 0.84);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 12px;
+    background: rgba(8, 11, 16, 0.48);
+    backdrop-filter: blur(12px);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    transform: translateX(-50%);
+}
+
+.spatial-ui-mobile-close {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    min-width: 126px;
+    height: 32px;
+    padding: 0 13px;
+    color: rgba(255, 255, 255, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 17px;
+    background: rgba(17, 20, 27, 0.7);
+    backdrop-filter: blur(16px);
+    transform: translateX(-50%);
+    pointer-events: auto;
+    cursor: pointer;
+}
+
 .spatial-ui-toggle {
     position: absolute;
     right: 16px;
@@ -130,6 +238,16 @@
 
 .spatial-ui-io {
     margin-top: 8px;
+}
+
+.spatial-ui-mobile-preview-toggle {
+    grid-column: 1 / -1;
+
+    &.active {
+        color: #15100a !important;
+        border-color: rgba(255, 176, 72, 0.9) !important;
+        background: #ffad42 !important;
+    }
 }
 
 .spatial-ui-section-title {

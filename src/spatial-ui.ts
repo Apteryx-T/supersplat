@@ -128,6 +128,8 @@ class SpatialUI {
     private list: HTMLDivElement;
     private inspector: HTMLDivElement;
     private toggle: HTMLButtonElement;
+    private mobilePreview: HTMLDivElement;
+    private mobilePreviewButton: HTMLButtonElement;
     private fileInput: HTMLInputElement;
     private nodes: SpatialNode[] = [];
     private elements = new Map<string, HTMLDivElement>();
@@ -155,15 +157,28 @@ class SpatialUI {
         this.panel.hidden = true;
         this.toggle = makeButton('空间 UI', 'spatial-ui-toggle');
         this.toggle.title = '添加和编辑高斯空间界面';
+        this.mobilePreview = document.createElement('div');
+        this.mobilePreview.className = 'spatial-ui-mobile-preview';
+        this.mobilePreview.hidden = true;
+        this.mobilePreview.innerHTML = `
+            <div class="spatial-ui-mobile-frame">
+                <span class="spatial-ui-mobile-resolution">1080 × 1920 · 9:16</span>
+                <i class="corner top-left"></i><i class="corner top-right"></i>
+                <i class="corner bottom-left"></i><i class="corner bottom-right"></i>
+                <button type="button" class="spatial-ui-mobile-close">× 关闭手机预览</button>
+            </div>`;
         this.fileInput = document.createElement('input');
         this.fileInput.type = 'file';
         this.fileInput.accept = 'application/json,.json';
         this.fileInput.hidden = true;
 
         this.root.append(this.nodesLayer, this.panel, this.toggle, this.fileInput);
-        this.container.appendChild(this.root);
+        this.container.append(this.root, this.mobilePreview);
         this.buildPanel();
         this.bindEvents();
+
+        this.mobilePreview.querySelector<HTMLButtonElement>('.spatial-ui-mobile-close')
+        .addEventListener('click', () => this.setMobilePreview(false));
 
         events.function('docSerialize.spatialUi', () => this.serialize());
         events.function('docDeserialize.spatialUi', (data?: SpatialUiDocument) => this.deserialize(data));
@@ -301,7 +316,11 @@ class SpatialUI {
         importButton.addEventListener('click', () => this.fileInput.click());
         const exportButton = makeButton('导出 UI JSON');
         exportButton.addEventListener('click', () => this.exportJson());
-        io.append(importButton, exportButton);
+        this.mobilePreviewButton = makeButton('▣ 开启手机预览', 'spatial-ui-mobile-preview-toggle');
+        this.mobilePreviewButton.addEventListener('click', () =>
+            this.setMobilePreview(this.mobilePreview.hasAttribute('hidden'))
+        );
+        io.append(importButton, exportButton, this.mobilePreviewButton);
 
         const listHeading = document.createElement('div');
         listHeading.className = 'spatial-ui-section-title';
@@ -368,6 +387,12 @@ class SpatialUI {
         this.nodes.forEach(node => this.renderNode(node));
         this.renderList();
         this.renderInspector();
+    }
+
+    private setMobilePreview(visible: boolean) {
+        this.mobilePreview.hidden = !visible;
+        this.mobilePreviewButton.classList.toggle('active', visible);
+        this.mobilePreviewButton.textContent = visible ? '▣ 关闭手机预览' : '▣ 开启手机预览';
     }
 
     private addNode(node: SpatialNode, dirty = true) {

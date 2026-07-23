@@ -191,6 +191,10 @@
     display: grid;
     gap: 5px;
 
+    &[hidden] {
+        display: none;
+    }
+
     > span {
         color: rgba(255, 255, 255, 0.54);
         font-size: 11px;
@@ -264,6 +268,7 @@
 
 .spatial-ui-node {
     --spatial-scale: 1;
+    --visibility-scale: 1;
     --component-background: rgba(31, 36, 45, 0.94);
     --component-border: rgba(255, 255, 255, 0.9);
     --component-foreground: #fff;
@@ -274,22 +279,23 @@
     background: transparent;
     backdrop-filter: blur(20px) saturate(150%);
     box-shadow: 0 14px 40px rgba(0, 0, 0, 0.3), inset 0 1px rgba(255, 255, 255, 0.15);
-    transform: translate(-50%, -50%) scale(var(--spatial-scale));
+    transform: translate(-50%, -50%) scale(calc(var(--spatial-scale) * var(--visibility-scale)));
     translate: 0 0;
     transform-origin: center;
     isolation: isolate;
     pointer-events: auto;
     user-select: none;
-    transition: opacity 0.36s ease, translate 0.55s cubic-bezier(0.22, 1.35, 0.36, 1),
+    transition: opacity 0.24s ease-out, transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
         visibility 0s linear, border-color 0.15s ease, color 0.15s ease;
 
-    &.spatial-ui-visibility-hidden {
+    &.spatial-ui-visibility-hidden,
+    &.runtime-hidden {
+        --visibility-scale: 0.08;
         visibility: hidden;
         opacity: 0;
-        translate: 0 50px;
         pointer-events: none;
-        transition: opacity 0.36s ease, translate 0.36s cubic-bezier(0.16, 1, 0.3, 1),
-            visibility 0s linear 0.36s, border-color 0.15s ease, color 0.15s ease;
+        transition: opacity 0.28s ease, transform 0.28s cubic-bezier(0.4, 0, 1, 1),
+            visibility 0s linear 0.28s, border-color 0.15s ease, color 0.15s ease;
     }
 
     &::before {
@@ -301,10 +307,6 @@
         opacity: var(--background-opacity, 1);
         pointer-events: none;
         content: '';
-    }
-
-    &.runtime-hidden {
-        display: none;
     }
 
     &.selected {
@@ -343,7 +345,8 @@
 
 @media (prefers-reduced-motion: reduce) {
     .spatial-ui-node,
-    .spatial-ui-node.spatial-ui-visibility-hidden {
+    .spatial-ui-node.spatial-ui-visibility-hidden,
+    .spatial-ui-node.runtime-hidden {
         transition-duration: 0s;
     }
 }

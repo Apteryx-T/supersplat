@@ -5,6 +5,19 @@ import { Scene } from './scene';
 
 type SpatialNodeType = 'button' | 'dialog' | 'card' | 'hotspot' | 'tool' | 'toolbar';
 type SpatialTheme = 'glass' | 'bold' | 'viral' | 'editorial' | 'roomtour';
+type SpatialNodeAction = 'none' | 'dialog' | 'furniture';
+
+type FurnitureOption = {
+    id: string;
+    label: string;
+};
+
+type FurnitureUiState = {
+    position: [number, number, number];
+    rotation: number;
+    scale: number;
+    visible: boolean;
+};
 
 type SpatialNode = {
     id: string;
@@ -21,7 +34,9 @@ type SpatialNode = {
     maxVisibleDistance: number;
     visible: boolean;
     theme: SpatialTheme;
+    action?: SpatialNodeAction;
     targetId?: string;
+    furnitureId?: string;
     eyebrow?: string;
     body?: string;
     meta?: string;
@@ -61,10 +76,13 @@ type MrDocument = {
 
 const supportedTypes = new Set<SpatialNodeType>(['button', 'dialog', 'card', 'hotspot', 'tool', 'toolbar']);
 const supportedThemes = new Set<SpatialTheme>(['glass', 'bold', 'viral', 'editorial', 'roomtour']);
-const defaultScreenScale = 1.6;
+const defaultScreenScale = 1.2;
 const defaultCreationDistance = 3;
+const visibilityDistanceVersion = 2;
+const legacyVisibilityDistanceOffset = 1;
 const maxVisibleDistanceLimit = 20;
 const screenEdgePadding = 200;
+const occlusionCheckInterval = 250;
 const workPosition = new Vec3();
 const workScreen = new Vec3();
 const workOffset = new Vec3();
@@ -117,6 +135,10 @@ class SpatialUI {
     private serial = 1;
     private editorOpen = false;
     private dirty = false;
+    private expandedFurnitureOwners = new Set<string>();
+    private occludedNodes = new Map<string, boolean>();
+    private occlusionCheckPending = false;
+    private lastOcclusionCheck = 0;
     private drag: { id: string, x: number, y: number, position: Vec3 } | null = null;
 
     constructor(events: Events, scene: Scene, container: HTMLElement) {
@@ -150,7 +172,31 @@ class SpatialUI {
             this.dirty = false;
         });
         events.on('scene.clear', () => this.clear(false));
-        events.on('update', () => this.updatePositions());
+        events.on('update', () => {
+            this.updatePositions();
+            this.scheduleOcclusionCheck();
+        });
+        events.on('furniture.deserialized', () => this.syncFurnitureModels(this.editorOpen));
+        events.on('furniture.ui.ready', (ownerId: string) => {
+            if (this.editorOpen && ownerId === this.selectedId) this.renderInspector();
+        });
+        events.on('furniture.ui.transform', (ownerId: string) => {
+            if (this.editorOpen && ownerId === this.selectedId) this.renderInspector();
+        });
+        events.on('furniture.ui.visibility', (ownerId: string, visible: boolean) => {
+            if (visible) {
+                this.expandedFurnitureOwners.add(ownerId);
+            } else {
+                this.expandedFurnitureOwners.delete(ownerId);
+            }
+            this.updatePositions();
+        });
+        events.on('furniture.ui.error', (ownerId: string, fallbackKind?: string) => {
+            const node = this.nodes.find(item => item.id === ownerId);
+            if (!node) return;
+            if (fallbackKind) node.furnitureId = fallbackKind;
+            if (this.editorOpen && ownerId === this.selectedId) this.renderInspector();
+        });
     }
 
     private nextId(type: SpatialNodeType) {
@@ -167,8 +213,8 @@ class SpatialUI {
         return {
             position: [position.x, position.y, position.z] as [number, number, number],
             scale: defaultScreenScale / perspectiveScale,
-            minVisibleDistance: 1.5,
-            maxVisibleDistance: 5
+            minVisibleDistance: 2.5,
+            maxVisibleDistance: 6
         };
     }
 
@@ -196,14 +242,16 @@ class SpatialUI {
             }[type],
             position: defaults.position,
             scale: defaults.scale,
-            backgroundOpacity: 1,
+            backgroundOpacity: 0.6,
             textOpacity: 1,
             borderOpacity: 1,
             minVisibleDistance: defaults.minVisibleDistance,
             maxVisibleDistance: defaults.maxVisibleDistance,
             visible: true,
             theme: 'glass',
+            action: ['button', 'hotspot', 'tool'].includes(type) ? 'none' : undefined,
             targetId: type === 'button' ? dialog?.id : undefined,
+            furnitureId: ['button', 'hotspot', 'tool'].includes(type) ? 'sofa' : undefined,
             eyebrow: type === 'card' ? 'ROOM TOUR / HOME' : undefined,
             body: type === 'dialog' ? '这是固定在高斯场景坐标中的交互弹窗。' :
                 type === 'card' ? '南向采光 · 开放式客餐厅 · 精装' : undefined,
@@ -275,7 +323,9 @@ class SpatialUI {
             const target = event.target as HTMLElement;
             const add = target.closest<HTMLButtonElement>('[data-add-spatial-ui]');
             if (add) {
-                this.addNode(this.defaultNode(add.dataset.addSpatialUi as SpatialNodeType));
+                const node = this.defaultNode(add.dataset.addSpatialUi as SpatialNodeType);
+                this.addNode(node);
+                if (node.action === 'furniture') this.syncFurnitureNode(node, true);
             }
         });
 
@@ -307,6 +357,10 @@ class SpatialUI {
 
     private setEditorOpen(open: boolean) {
         this.editorOpen = open;
+        this.expandedFurnitureOwners.clear();
+        if (open) this.occludedNodes.clear();
+        this.events.fire('furniture.ui.editor', open);
+        this.syncFurnitureModels(open);
         this.panel.hidden = !open;
         this.root.classList.toggle('is-editing', open);
         this.toggle.classList.toggle('active', open);
@@ -424,6 +478,13 @@ class SpatialUI {
             return;
         }
         if (node.type === 'button' || node.type === 'hotspot' || node.type === 'tool') {
+            if (node.action === 'none') return;
+            if (node.action === 'furniture') {
+                this.expandedFurnitureOwners.add(node.id);
+                this.updatePositions();
+                this.syncFurnitureNode(node, true);
+                return;
+            }
             const dialog = this.nodes.find(item => item.id === node.targetId) ?? this.nodes.find(item => item.type === 'dialog');
             if (dialog) {
                 dialog.open = true;
@@ -475,13 +536,63 @@ class SpatialUI {
             // Keep applying it while the editor is open so camera previews match
             // the final result instead of forcing every component to stay visible.
             const withinDistance = distance >= node.minVisibleDistance && distance <= node.maxVisibleDistance;
-            const shouldShow = node.visible && inFront && withinScreenSafeArea && withinDistance;
+            const furnitureExpanded = !this.editorOpen && node.action === 'furniture' &&
+                this.expandedFurnitureOwners.has(node.id);
+            const occluded = !this.editorOpen && this.occludedNodes.get(node.id) === true;
+            const shouldShow = node.visible && inFront && withinScreenSafeArea && withinDistance &&
+                !furnitureExpanded && !occluded;
             element.classList.toggle('spatial-ui-visibility-hidden', !shouldShow);
             element.style.left = `${screenX}px`;
             element.style.top = `${screenY}px`;
             element.style.setProperty('--spatial-scale', `${spatialScale}`);
             element.style.zIndex = `${clamp(Math.round(10000 / distance), 1, 9999)}`;
         }
+    }
+
+    private scheduleOcclusionCheck() {
+        if (this.editorOpen || this.occlusionCheckPending) return;
+        const now = performance.now();
+        if (now - this.lastOcclusionCheck < occlusionCheckInterval) return;
+        this.lastOcclusionCheck = now;
+        this.occlusionCheckPending = true;
+        void this.refreshOcclusion().finally(() => {
+            this.occlusionCheckPending = false;
+        });
+    }
+
+    private async refreshOcclusion() {
+        const cameraPosition = this.scene.camera.position;
+        const cameraForward = this.scene.camera.forward;
+        const width = Math.max(1, this.container.clientWidth);
+        const height = Math.max(1, this.container.clientHeight);
+        const activeIds = new Set<string>();
+
+        for (const node of this.nodes) {
+            activeIds.add(node.id);
+            workPosition.set(node.position[0], node.position[1], node.position[2]);
+            workOffset.sub2(workPosition, cameraPosition);
+            const distance = workOffset.length();
+            const inFront = workOffset.dot(cameraForward) > 0;
+            const withinDistance = distance >= node.minVisibleDistance && distance <= node.maxVisibleDistance;
+            this.scene.camera.worldToScreen(workPosition, workScreen);
+            const x = workScreen.x;
+            const y = workScreen.y;
+            const withinViewport = x >= 0 && x <= 1 && y >= 0 && y <= 1;
+
+            if (!node.visible || !inFront || !withinDistance || !withinViewport) {
+                this.occludedNodes.set(node.id, false);
+                continue;
+            }
+
+            const hit = await this.scene.camera.intersect(x, y);
+            const margin = Math.max(0.08, distance * 0.015);
+            this.occludedNodes.set(node.id, Boolean(hit && hit.distance < distance - margin));
+        }
+
+        this.occludedNodes.forEach((_occluded, id) => {
+            if (!activeIds.has(id)) this.occludedNodes.delete(id);
+        });
+        this.updatePositions();
     }
 
     private renderList() {
@@ -669,10 +780,23 @@ class SpatialUI {
         }
 
         if (node.type === 'button' || node.type === 'hotspot' || node.type === 'tool') {
+            const action = document.createElement('select');
+            ([
+                ['none', '无（不执行任何操作）'],
+                ['dialog', '打开弹窗'],
+                ['furniture', '创建家具']
+            ] as [SpatialNodeAction, string][]).forEach(([value, label]) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = label;
+                action.appendChild(option);
+            });
+            action.value = node.action ?? 'none';
+
             const target = document.createElement('select');
             const none = document.createElement('option');
             none.value = '';
-            none.textContent = '无操作';
+            none.textContent = '自动选择第一个弹窗';
             target.appendChild(none);
             this.nodes.filter(item => item.type === 'dialog').forEach((dialog) => {
                 const option = document.createElement('option');
@@ -685,7 +809,103 @@ class SpatialUI {
                 node.targetId = target.value || undefined;
                 this.markDirty();
             });
-            this.inspector.appendChild(makeField('点击动作', target));
+
+            const furniture = document.createElement('select');
+            const furnitureOptions = (this.events.invoke('furniture.catalog') as FurnitureOption[] | undefined) ?? [];
+            furnitureOptions.forEach((item) => {
+                const option = document.createElement('option');
+                option.value = item.id;
+                option.textContent = item.label;
+                furniture.appendChild(option);
+            });
+            furniture.value = node.furnitureId || 'sofa';
+            furniture.addEventListener('change', () => {
+                node.furnitureId = furniture.value || 'sofa';
+                this.syncFurnitureNode(node, this.editorOpen);
+                this.markDirty();
+            });
+
+            const actionField = makeField('点击动作', action);
+            const targetField = makeField('目标弹窗', target);
+            const furnitureField = makeField('家具模型', furniture);
+            const furnitureState = this.events.invoke('furniture.ui.state', node.id) as FurnitureUiState | undefined;
+            const furniturePosition = document.createElement('div');
+            furniturePosition.className = 'spatial-ui-coordinates';
+            const furniturePositionInputs = (furnitureState?.position ?? [0, 0, 0]).map((value, index) => {
+                const input = document.createElement('input');
+                input.type = 'number';
+                input.step = '0.01';
+                input.value = Number(value).toFixed(3);
+                input.title = ['X', 'Y', 'Z'][index];
+                input.disabled = !furnitureState;
+                furniturePosition.appendChild(input);
+                return input;
+            });
+            const furnitureScale = document.createElement('input');
+            furnitureScale.type = 'range';
+            furnitureScale.min = '0.25';
+            furnitureScale.max = '3';
+            furnitureScale.step = '0.05';
+            furnitureScale.value = String(furnitureState?.scale ?? 1);
+            furnitureScale.disabled = !furnitureState;
+            const furnitureScaleNumber = document.createElement('input');
+            furnitureScaleNumber.type = 'number';
+            furnitureScaleNumber.min = '0.25';
+            furnitureScaleNumber.max = '3';
+            furnitureScaleNumber.step = '0.05';
+            furnitureScaleNumber.value = Number(furnitureScale.value).toFixed(2);
+            furnitureScaleNumber.disabled = !furnitureState;
+            const furnitureScaleControl = document.createElement('div');
+            furnitureScaleControl.className = 'spatial-ui-distance-control';
+            furnitureScaleControl.append(furnitureScale, furnitureScaleNumber);
+            const furnitureRotation = document.createElement('input');
+            furnitureRotation.type = 'number';
+            furnitureRotation.step = '1';
+            furnitureRotation.value = String(furnitureState?.rotation ?? 0);
+            furnitureRotation.disabled = !furnitureState;
+            const updateFurnitureTransform = () => {
+                this.events.invoke('furniture.ui.update', node.id, {
+                    position: furniturePositionInputs.map(input => Number(input.value) || 0),
+                    rotation: Number(furnitureRotation.value) || 0,
+                    scale: clamp(Number(furnitureScale.value) || 1, 0.25, 3)
+                });
+            };
+            furniturePositionInputs.forEach(input => input.addEventListener('input', updateFurnitureTransform));
+            furnitureScale.addEventListener('input', () => {
+                furnitureScaleNumber.value = Number(furnitureScale.value).toFixed(2);
+                updateFurnitureTransform();
+            });
+            furnitureScaleNumber.addEventListener('input', () => {
+                furnitureScale.value = String(clamp(Number(furnitureScaleNumber.value) || 1, 0.25, 3));
+                updateFurnitureTransform();
+            });
+            furnitureRotation.addEventListener('input', updateFurnitureTransform);
+            const furniturePositionField = makeField('家具位置 X / Y / Z', furniturePosition);
+            const furnitureScaleField = makeField('家具缩放', furnitureScaleControl);
+            const furnitureRotationField = makeField('家具旋转 Y', furnitureRotation);
+            const updateActionFields = () => {
+                const value = action.value as SpatialNodeAction;
+                targetField.hidden = value !== 'dialog';
+                furnitureField.hidden = value !== 'furniture';
+                furniturePositionField.hidden = value !== 'furniture';
+                furnitureScaleField.hidden = value !== 'furniture';
+                furnitureRotationField.hidden = value !== 'furniture';
+            };
+            action.addEventListener('change', () => {
+                const previousAction = node.action;
+                node.action = action.value as SpatialNodeAction;
+                if (node.action === 'furniture') {
+                    if (!node.furnitureId) node.furnitureId = 'sofa';
+                    this.syncFurnitureNode(node, this.editorOpen);
+                } else if (previousAction === 'furniture') {
+                    this.events.invoke('furniture.ui.remove', node.id);
+                }
+                updateActionFields();
+                this.markDirty();
+            });
+            updateActionFields();
+            this.inspector.append(actionField, targetField, furnitureField, furniturePositionField,
+                furnitureScaleField, furnitureRotationField);
         }
 
         const coords = document.createElement('div');
@@ -722,6 +942,8 @@ class SpatialUI {
     }
 
     private removeNode(id: string) {
+        this.expandedFurnitureOwners.delete(id);
+        this.events.invoke('furniture.ui.remove', id);
         this.nodes = this.nodes.filter(node => node.id !== id);
         this.elements.get(id)?.remove();
         this.elements.delete(id);
@@ -735,6 +957,9 @@ class SpatialUI {
     }
 
     private clear(dirty: boolean) {
+        this.expandedFurnitureOwners.clear();
+        this.occludedNodes.clear();
+        this.nodes.forEach(node => this.events.invoke('furniture.ui.remove', node.id));
         this.nodes = [];
         this.elements.forEach(element => element.remove());
         this.elements.clear();
@@ -744,13 +969,23 @@ class SpatialUI {
         this.renderInspector();
     }
 
+    private syncFurnitureNode(node: SpatialNode, visible: boolean) {
+        if (node.action !== 'furniture') return;
+        this.events.invoke('furniture.ui.ensure', node.id, node.furnitureId || 'sofa', visible,
+            [node.position[0], 0, node.position[2]]);
+    }
+
+    private syncFurnitureModels(visible: boolean) {
+        this.nodes.forEach(node => this.syncFurnitureNode(node, visible));
+    }
+
     private markDirty() {
         this.dirty = true;
     }
 
     private serialize(): SpatialUiDocument {
         return {
-            version: 1,
+            version: visibilityDistanceVersion,
             nodes: this.nodes.map((node) => {
                 const { open, opacity, ...persisted } = node;
                 return {
@@ -768,6 +1003,11 @@ class SpatialUI {
             if (!supportedTypes.has(raw.type)) return;
             const defaults = this.defaultViewSettings();
             const legacyOpacity = normalizeOpacity(raw.opacity);
+            const migrateDistance = (Number(data.version) || 1) < visibilityDistanceVersion;
+            const minDistance = normalizeMinDistance(raw.minVisibleDistance, defaults.minVisibleDistance) +
+                (migrateDistance && Number.isFinite(Number(raw.minVisibleDistance)) ? legacyVisibilityDistanceOffset : 0);
+            const maxDistance = normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance) +
+                (migrateDistance && Number.isFinite(Number(raw.maxVisibleDistance)) ? legacyVisibilityDistanceOffset : 0);
             const node: SpatialNode = {
                 ...raw,
                 id: raw.id || this.nextId(raw.type),
@@ -776,12 +1016,12 @@ class SpatialUI {
                 backgroundOpacity: normalizeOpacity(raw.backgroundOpacity, legacyOpacity),
                 textOpacity: normalizeOpacity(raw.textOpacity, legacyOpacity),
                 borderOpacity: normalizeOpacity(raw.borderOpacity, legacyOpacity),
-                minVisibleDistance: normalizeMinDistance(raw.minVisibleDistance, defaults.minVisibleDistance),
-                maxVisibleDistance: clamp(
-                    normalizeDistance(raw.maxVisibleDistance, defaults.maxVisibleDistance), 0, maxVisibleDistanceLimit
-                ),
+                minVisibleDistance: clamp(minDistance, 0, maxVisibleDistanceLimit),
+                maxVisibleDistance: clamp(maxDistance, 0, maxVisibleDistanceLimit),
                 theme: supportedThemes.has(raw.theme) ? raw.theme : 'glass',
                 visible: raw.visible !== false,
+                action: ['none', 'dialog', 'furniture'].includes(raw.action) ? raw.action : 'none',
+                furnitureId: raw.furnitureId || 'sofa',
                 open: raw.type === 'dialog'
             };
             node.minVisibleDistance = Math.min(node.minVisibleDistance, node.maxVisibleDistance);
@@ -826,7 +1066,7 @@ class SpatialUI {
                 text: raw.text || '',
                 position: this.mrPosition((raw.x ?? 480) + (raw.w ?? 0) / 2, raw.y ?? 270),
                 scale: clamp((raw.w ?? 180) / 180, 0.55, 1.8),
-                backgroundOpacity: normalizeOpacity((raw.opacity ?? 100) / 100),
+                backgroundOpacity: normalizeOpacity((raw.opacity ?? 60) / 100),
                 textOpacity: normalizeOpacity((raw.textOpacity ?? 100) / 100),
                 borderOpacity: normalizeOpacity((raw.borderOpacity ?? 100) / 100),
                 minVisibleDistance: normalizeMinDistance(raw.minVisibleDistance, defaults.minVisibleDistance),
@@ -845,7 +1085,10 @@ class SpatialUI {
         });
         const dialog = imported.find(node => node.type === 'dialog');
         imported.forEach((node) => {
-            if (dialog && ['button', 'hotspot', 'tool'].includes(node.type)) node.targetId = dialog.id;
+            if (dialog && ['button', 'hotspot', 'tool'].includes(node.type)) {
+                node.action = 'dialog';
+                node.targetId = dialog.id;
+            }
             this.addNode(node, false);
         });
         this.markDirty();

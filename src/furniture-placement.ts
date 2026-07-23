@@ -1,11 +1,12 @@
 import {
     Asset,
+    BLEND_NORMAL,
     BoundingBox,
     Color,
     ContainerResource,
     Entity,
-    Ray,
     RenderComponent,
+    StandardMaterial,
     Vec3
 } from 'playcanvas';
 
@@ -27,6 +28,8 @@ type FurnitureState = {
     position: [number, number, number];
     rotation: number;
     scale: number;
+    ownerId?: string;
+    visible?: boolean;
 };
 
 type FurnitureDocument = {
@@ -39,6 +42,14 @@ type FurnitureItem = FurnitureState & {
     scaleRoot: Entity;
     baseScale: number;
     localBound: BoundingBox;
+    fade: number;
+    fadeTarget: number;
+    fadeMaterials: {
+        material: StandardMaterial,
+        opacity: number,
+        blendType: number,
+        depthWrite: boolean
+    }[];
 };
 
 const furnitureCatalog: FurnitureDefinition[] = [
@@ -78,12 +89,21 @@ const categoryLabels: Record<'all' | FurnitureCategory, string> = {
 const categoryIcons: Record<FurnitureCategory, string> = {
     furniture: '▰', appliance: '◉', decoration: '✦'
 };
+const categoryDescriptions: Record<FurnitureCategory, string> = {
+    furniture: '用于室内布局预览的空间家具，可移动、旋转并按场景比例缩放。',
+    appliance: '用于空间规划与动线检查的家电模型，可自由调整位置与朝向。',
+    decoration: '用于丰富室内层次与氛围的装饰模型，可作为空间陈设参考。'
+};
 const modelUrl = (definition: FurnitureDefinition) => `static/furniture/${definition.filename}`;
 const workScreen = new Vec3();
 const workPosition = new Vec3();
-const workRay = new Ray();
+const workLocal = new Vec3();
+const workGroundRight = new Vec3();
+const workGroundForward = new Vec3();
+const workInfoAnchor = new Vec3();
 const furnitureBoundColor = new Color(1, 1, 1, 0.72);
 const selectedBoundColor = new Color(1, 0.68, 0.3, 1);
+const furnitureFadeDuration = 0.45;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const makeButton = (text: string, className = '') => {
@@ -103,6 +123,7 @@ class FurniturePlacement {
     private dock: HTMLDivElement;
     private controls: HTMLDivElement;
     private selection: HTMLDivElement;
+    private infoCards = new Map<string, HTMLDivElement>();
     private count: HTMLElement;
     private hint: HTMLElement;
     private scaleLabel: HTMLOutputElement;
@@ -115,7 +136,20 @@ class FurniturePlacement {
     private assets = new Map<string, Asset>();
     private assetPromises = new Map<string, Promise<Asset>>();
     private activeCategory: 'all' | FurnitureCategory = 'all';
-    private drag: { item: FurnitureItem, moved: boolean, offsetX: number, offsetZ: number } | null = null;
+    private drag: {
+        item: FurnitureItem,
+        moved: boolean,
+        startX: number,
+        startY: number,
+        position: [number, number, number]
+    } | null = null;
+    private uiEditing = false;
+    private uiModelTargets = new Map<string, {
+        kind: string,
+        visible: boolean,
+        position: [number, number, number]
+    }>();
+    private uiModelPromises = new Map<string, Promise<string | undefined>>();
 
     constructor(events: Events, scene: Scene, container: HTMLElement) {
         this.events = events;
@@ -142,11 +176,33 @@ class FurniturePlacement {
         events.function('docSerialize.furniture', () => this.serialize());
         events.function('docDeserialize.furniture', (data?: FurnitureDocument) => this.deserialize(data));
         events.function('furniture.dirty', () => this.dirty);
+        events.function('furniture.catalog', () => furnitureCatalog.map(({ id, label }) => ({ id, label })));
+        events.function('furniture.add', (kind: string) => this.addModel(kind));
+        events.function('furniture.ui.ensure', (
+            ownerId: string,
+            kind: string,
+            visible = false,
+            position: [number, number, number] = [0, 0, 0]
+        ) => this.ensureUiModel(ownerId, kind, visible, position));
+        events.function('furniture.ui.setVisible', (ownerId: string, visible: boolean) =>
+            this.setUiModelVisible(ownerId, visible));
+        events.function('furniture.ui.remove', (ownerId: string) => this.removeUiModel(ownerId));
+        events.function('furniture.ui.state', (ownerId: string) => this.getUiModelState(ownerId));
+        events.function('furniture.ui.update', (ownerId: string, update: Partial<FurnitureState>) =>
+            this.updateUiModel(ownerId, update));
+        events.on('furniture.ui.editor', (open: boolean) => {
+            this.uiEditing = open;
+            this.updateOverlay();
+            this.scene.forceRender = true;
+        });
         events.on('doc.saved', () => {
             this.dirty = false;
         });
         events.on('scene.clear', () => this.clear(false));
-        events.on('update', () => this.updateOverlay());
+        events.on('update', (deltaTime: number) => {
+            this.updateFades(deltaTime);
+            this.updateOverlay();
+        });
         events.on('prerender', () => this.renderBounds());
         events.on('furniture.open', () => this.setOpen(true));
     }
@@ -345,12 +401,68 @@ class FurniturePlacement {
         };
     }
 
+    private prepareFadeMaterials(model: Entity) {
+        const clones = new Map<StandardMaterial, StandardMaterial>();
+        const fadeMaterials: FurnitureItem['fadeMaterials'] = [];
+        const renders = model.findComponents('render') as RenderComponent[];
+        renders.forEach(render => render.meshInstances.forEach((meshInstance) => {
+            if (!(meshInstance.material instanceof StandardMaterial)) return;
+            const source = meshInstance.material;
+            let material = clones.get(source);
+            if (!material) {
+                material = source.clone();
+                clones.set(source, material);
+                fadeMaterials.push({
+                    material,
+                    opacity: material.opacity,
+                    blendType: material.blendType,
+                    depthWrite: material.depthWrite
+                });
+            }
+            meshInstance.material = material;
+        }));
+        return fadeMaterials;
+    }
+
+    private applyFade(item: FurnitureItem) {
+        const eased = item.fade * item.fade * (3 - 2 * item.fade);
+        item.fadeMaterials.forEach((entry) => {
+            const fading = item.fade < 0.999;
+            entry.material.opacity = entry.opacity * eased;
+            entry.material.blendType = fading ? BLEND_NORMAL : entry.blendType;
+            entry.material.depthWrite = fading ? false : entry.depthWrite;
+            entry.material.update();
+        });
+    }
+
+    private setItemVisibility(item: FurnitureItem, visible: boolean) {
+        item.visible = visible;
+        item.fadeTarget = visible ? 1 : 0;
+        if (visible) item.entity.enabled = true;
+        if (!visible && item.fade <= 0.001) item.entity.enabled = false;
+    }
+
+    private updateFades(deltaTime: number) {
+        const step = Math.max(0, deltaTime) / furnitureFadeDuration;
+        let changed = false;
+        this.items.forEach((item) => {
+            if (item.fade === item.fadeTarget) return;
+            item.fade = item.fadeTarget > item.fade ?
+                Math.min(item.fadeTarget, item.fade + step) :
+                Math.max(item.fadeTarget, item.fade - step);
+            this.applyFade(item);
+            if (item.fadeTarget === 0 && item.fade <= 0.001) item.entity.enabled = false;
+            changed = true;
+        });
+        if (changed) this.scene.forceRender = true;
+    }
+
     private async addModel(
         kind: string,
         raw?: Partial<FurnitureState>,
         markDirty = true,
         button?: HTMLButtonElement
-    ) {
+    ): Promise<FurnitureItem | null> {
         try {
             const definition = catalogById.get(kind) ?? catalogById.get('office-desk');
             const asset = await this.loadAsset(definition, button);
@@ -361,6 +473,7 @@ class FurniturePlacement {
             const wrapper = new Entity(raw?.id || `furniture-${definition.id}-${this.serial++}`);
             const scaleRoot = new Entity('Furniture Scale');
             const model = (asset.resource as ContainerResource).instantiateRenderEntity();
+            const fadeMaterials = this.prepareFadeMaterials(model);
             wrapper.addChild(scaleRoot);
             scaleRoot.addChild(model);
             this.scene.contentRoot.addChild(wrapper);
@@ -377,17 +490,25 @@ class FurniturePlacement {
                 position: [...position] as [number, number, number],
                 rotation: Number(raw?.rotation) || 0,
                 scale: clamp(Number(raw?.scale) || 1, 0.25, 3),
+                ownerId: raw?.ownerId,
+                visible: raw?.visible !== false,
                 entity: wrapper,
                 scaleRoot,
-                baseScale: normalization.scale,
-                localBound: normalization.localBound
+                baseScale: raw?.ownerId ? 1 : normalization.scale,
+                localBound: normalization.localBound,
+                fade: 0,
+                fadeTarget: raw?.visible === false ? 0 : 1,
+                fadeMaterials
             };
             this.items.push(item);
             this.selectedId = item.id;
+            item.entity.enabled = item.visible;
+            this.applyFade(item);
             this.applyTransform(item);
             if (markDirty) this.markDirty();
             this.updateStatus();
             this.updateOverlay();
+            return item;
         } catch (error) {
             const definition = catalogById.get(kind);
             this.hint.textContent = `${definition?.label ?? '模型'}加载失败`;
@@ -396,7 +517,129 @@ class FurniturePlacement {
                 header: '无法加载家具模型',
                 message: error.message ?? String(error)
             });
+            return null;
         }
+    }
+
+    private ensureUiModel(
+        ownerId: string,
+        kind: string,
+        visible: boolean,
+        position: [number, number, number]
+    ) {
+        const existingTarget = this.uiModelTargets.get(ownerId);
+        this.uiModelTargets.set(ownerId, { kind, visible, position: existingTarget?.position ?? position });
+        const pending = this.uiModelPromises.get(ownerId);
+        if (pending) return pending;
+        const promise = this.ensureUiModelTarget(ownerId).finally(() => this.uiModelPromises.delete(ownerId));
+        this.uiModelPromises.set(ownerId, promise);
+        return promise;
+    }
+
+    private async ensureUiModelTarget(ownerId: string): Promise<string | undefined> {
+        while (this.uiModelTargets.has(ownerId)) {
+            const target = this.uiModelTargets.get(ownerId)!;
+            let item = this.items.find(candidate => candidate.ownerId === ownerId);
+            if (item?.kind !== target.kind) {
+                const previous = item;
+                const preserved = item ? {
+                    id: item.id,
+                    position: [...item.position] as [number, number, number],
+                    rotation: item.rotation,
+                    scale: item.scale
+                } : undefined;
+                const replacement = await this.addModel(target.kind, {
+                    ...preserved,
+                    id: preserved?.id || `ui-furniture-${ownerId}`,
+                    position: preserved?.position ?? target.position,
+                    ownerId,
+                    visible: target.visible
+                });
+                if (!replacement) {
+                    if (previous) {
+                        this.uiModelTargets.set(ownerId, { ...target, kind: previous.kind });
+                        this.selectedId = previous.id;
+                        this.events.fire('furniture.ui.error', ownerId, previous.kind);
+                        this.updateOverlay();
+                        return previous.id;
+                    }
+                    this.events.fire('furniture.ui.error', ownerId, undefined);
+                    return undefined;
+                }
+                item = replacement;
+                if (previous) {
+                    previous.entity.destroy();
+                    this.items.splice(this.items.indexOf(previous), 1);
+                }
+            }
+
+            const latest = this.uiModelTargets.get(ownerId);
+            if (!latest) {
+                item.entity.destroy();
+                this.items.splice(this.items.indexOf(item), 1);
+                return undefined;
+            }
+            if (item.kind !== latest.kind) continue;
+            this.setItemVisibility(item, latest.visible);
+            if (latest.visible) this.selectedId = item.id;
+            this.updateStatus();
+            this.updateOverlay();
+            this.scene.forceRender = true;
+            this.events.fire('furniture.ui.ready', ownerId);
+            return item.id;
+        }
+        return undefined;
+    }
+
+    private setUiModelVisible(ownerId: string, visible: boolean) {
+        const target = this.uiModelTargets.get(ownerId);
+        if (target) target.visible = visible;
+        const item = this.items.find(candidate => candidate.ownerId === ownerId);
+        if (!item) return false;
+        this.setItemVisibility(item, visible);
+        if (visible) this.selectedId = item.id;
+        this.updateOverlay();
+        this.scene.forceRender = true;
+        this.events.fire('furniture.ui.visibility', ownerId, visible);
+        return true;
+    }
+
+    private removeUiModel(ownerId: string) {
+        this.uiModelTargets.delete(ownerId);
+        const index = this.items.findIndex(item => item.ownerId === ownerId);
+        if (index < 0) return;
+        const [item] = this.items.splice(index, 1);
+        item.entity.destroy();
+        if (this.selectedId === item.id) this.selectedId = null;
+        this.markDirty();
+        this.updateStatus();
+        this.updateOverlay();
+    }
+
+    private getUiModelState(ownerId: string) {
+        const item = this.items.find(candidate => candidate.ownerId === ownerId);
+        if (!item) return undefined;
+        return {
+            position: [...item.position] as [number, number, number],
+            rotation: item.rotation,
+            scale: item.scale,
+            visible: item.visible
+        };
+    }
+
+    private updateUiModel(ownerId: string, update: Partial<FurnitureState>) {
+        const item = this.items.find(candidate => candidate.ownerId === ownerId);
+        if (!item) return false;
+        if (Array.isArray(update.position) && update.position.length === 3) {
+            item.position = update.position.map(value => Number(value) || 0) as [number, number, number];
+        }
+        if (Number.isFinite(update.rotation)) item.rotation = Number(update.rotation);
+        if (Number.isFinite(update.scale)) item.scale = clamp(Number(update.scale), 0.25, 3);
+        this.applyTransform(item);
+        this.markDirty();
+        this.updateStatus();
+        this.updateOverlay();
+        return true;
     }
 
     private applyTransform(item: FurnitureItem) {
@@ -408,43 +651,54 @@ class FurniturePlacement {
     }
 
     private itemAt(clientX: number, clientY: number) {
-        const rect = this.container.getBoundingClientRect();
         let nearest: FurnitureItem | null = null;
         let nearestDistance = Infinity;
-        this.items.forEach((item) => {
-            workPosition.set(item.position[0], item.position[1], item.position[2]);
-            this.scene.camera.worldToScreen(workPosition, workScreen);
-            const dx = clientX - (rect.left + workScreen.x * rect.width);
-            const dy = clientY - (rect.top + workScreen.y * rect.height);
-            const distance = Math.hypot(dx, dy);
+        this.items.filter(item => item.visible && (!this.uiEditing || item.ownerId)).forEach((item) => {
+            const bounds = this.screenBounds(item);
+            if (!bounds) return;
+            const { minX, minY, maxX, maxY } = bounds;
+            const padding = 24;
+            if (clientX < minX - padding || clientX > maxX + padding ||
+                clientY < minY - padding || clientY > maxY + padding) return;
+            const distance = Math.hypot(clientX - (minX + maxX) * 0.5, clientY - (minY + maxY) * 0.5);
             if (distance < nearestDistance) {
                 nearest = item;
                 nearestDistance = distance;
             }
         });
-        return nearestDistance < 110 ? nearest : null;
+        return nearest;
     }
 
-    private pointerOnPlane(y: number, event: PointerEvent, target: Vec3) {
+    private screenBounds(item: FurnitureItem) {
         const rect = this.container.getBoundingClientRect();
-        this.scene.camera.getRay(event.clientX - rect.left, event.clientY - rect.top, workRay);
-        if (Math.abs(workRay.direction.y) < 0.0001) return false;
-        const distance = (y - workRay.origin.y) / workRay.direction.y;
-        if (distance <= 0) return false;
-        target.copy(workRay.origin).add(workRay.direction.clone().mulScalar(distance));
-        return true;
-    }
-
-    private moveToPointer(item: FurnitureItem, event: PointerEvent, offsetX: number, offsetZ: number) {
-        if (!this.pointerOnPlane(item.position[1], event, workPosition)) return;
-        item.position[0] = workPosition.x + offsetX;
-        item.position[2] = workPosition.z + offsetZ;
-        this.applyTransform(item);
-        this.updateOverlay();
+        const min = item.localBound.getMin();
+        const max = item.localBound.getMax();
+        const transform = item.scaleRoot.getWorldTransform();
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        let inFront = false;
+        for (const x of [min.x, max.x]) {
+            for (const y of [min.y, max.y]) {
+                for (const z of [min.z, max.z]) {
+                    transform.transformPoint(workLocal.set(x, y, z), workPosition);
+                    this.scene.camera.worldToScreen(workPosition, workScreen);
+                    inFront ||= workScreen.z >= -1 && workScreen.z <= 1;
+                    const screenX = rect.left + workScreen.x * rect.width;
+                    const screenY = rect.top + workScreen.y * rect.height;
+                    minX = Math.min(minX, screenX);
+                    minY = Math.min(minY, screenY);
+                    maxX = Math.max(maxX, screenX);
+                    maxY = Math.max(maxY, screenY);
+                }
+            }
+        }
+        return inFront ? { minX, minY, maxX, maxY } : null;
     }
 
     private onPointerDown(event: PointerEvent) {
-        if (!this.open || event.button !== 0) return;
+        if ((!this.open && !this.uiEditing) || event.button !== 0) return;
         if ((event.target as HTMLElement).closest(
             '.furniture-dock, .furniture-controls, button, input, select, textarea, [role="button"]'
         )) return;
@@ -453,13 +707,12 @@ class FurniturePlacement {
         event.preventDefault();
         event.stopPropagation();
         this.selectedId = hit.id;
-        const pointerPosition = new Vec3();
-        if (!this.pointerOnPlane(hit.position[1], event, pointerPosition)) return;
         this.drag = {
             item: hit,
             moved: false,
-            offsetX: hit.position[0] - pointerPosition.x,
-            offsetZ: hit.position[2] - pointerPosition.z
+            startX: event.clientX,
+            startY: event.clientY,
+            position: [...hit.position]
         };
         this.updateStatus();
         this.updateOverlay();
@@ -470,7 +723,26 @@ class FurniturePlacement {
         event.preventDefault();
         event.stopPropagation();
         this.drag.moved = true;
-        this.moveToPointer(this.drag.item, event, this.drag.offsetX, this.drag.offsetZ);
+        const item = this.drag.item;
+        const distance = Math.max(0.1, this.scene.camera.position.distance(
+            workPosition.set(this.drag.position[0], this.drag.position[1], this.drag.position[2])
+        ));
+        const worldPerPixel = 2 * Math.tan(this.scene.camera.fov * Math.PI / 360) * distance /
+            Math.max(1, this.container.clientHeight);
+        workGroundRight.copy(this.scene.camera.mainCamera.right);
+        workGroundRight.y = 0;
+        if (workGroundRight.lengthSq() < 0.000001) workGroundRight.set(1, 0, 0);
+        else workGroundRight.normalize();
+        workGroundForward.copy(this.scene.camera.forward);
+        workGroundForward.y = 0;
+        if (workGroundForward.lengthSq() < 0.000001) workGroundForward.set(0, 0, -1);
+        else workGroundForward.normalize();
+        const dx = (event.clientX - this.drag.startX) * worldPerPixel;
+        const dz = -(event.clientY - this.drag.startY) * worldPerPixel;
+        item.position[0] = this.drag.position[0] + workGroundRight.x * dx + workGroundForward.x * dz;
+        item.position[2] = this.drag.position[2] + workGroundRight.z * dx + workGroundForward.z * dz;
+        this.applyTransform(item);
+        this.updateOverlay();
     }
 
     private onPointerUp(event: PointerEvent) {
@@ -478,13 +750,18 @@ class FurniturePlacement {
         event.preventDefault();
         event.stopPropagation();
         const moved = this.drag.moved;
+        const ownerId = this.drag.item.ownerId;
         this.drag = null;
-        if (moved) this.markDirty();
+        if (moved) {
+            this.markDirty();
+            if (ownerId) this.events.fire('furniture.ui.transform', ownerId);
+        }
     }
 
     private runAction(action?: string) {
         const item = this.items.find(candidate => candidate.id === this.selectedId);
         if (!item) return;
+        if (item.ownerId && (action === 'duplicate' || action === 'delete')) return;
         const heightStep = Math.max(0.01, this.scene.camera.sceneRadius * 0.015);
         if (action === 'rotate-left') item.rotation -= 15;
         if (action === 'rotate-right') item.rotation += 15;
@@ -508,6 +785,7 @@ class FurniturePlacement {
         this.markDirty();
         this.updateStatus();
         this.updateOverlay();
+        if (item.ownerId) this.events.fire('furniture.ui.transform', item.ownerId);
     }
 
     private removeSelected() {
@@ -529,25 +807,115 @@ class FurniturePlacement {
         if (this.scaleLabel) this.scaleLabel.textContent = `${Math.round((selected?.scale || 1) * 100)}%`;
     }
 
+    private getInfoCard(item: FurnitureItem) {
+        const existing = this.infoCards.get(item.id);
+        if (existing) return existing;
+        const card = document.createElement('div');
+        card.className = 'furniture-info-card';
+        card.dataset.furnitureItemId = item.id;
+        card.innerHTML = `
+            <span class="furniture-info-category"></span>
+            <strong class="furniture-info-title"></strong>
+            <div class="furniture-info-rating" aria-label="四星推荐">
+                <span>★★★★</span><i>☆</i>
+            </div>
+            <strong class="furniture-info-primary"></strong>
+            <p class="furniture-info-description"></p>
+            <button type="button" class="furniture-info-action" data-furniture-info-action="hide">
+                <span aria-hidden="true">▰</span><b>隐藏家具</b><i>→</i>
+            </button>
+            <small class="furniture-info-model"></small>`;
+        card.addEventListener('pointerdown', event => event.stopPropagation());
+        card.addEventListener('click', (event) => {
+            const action = (event.target as HTMLElement).closest<HTMLElement>('[data-furniture-info-action="hide"]');
+            if (!action) return;
+            event.stopPropagation();
+            const target = this.items.find(candidate => candidate.id === card.dataset.furnitureItemId);
+            if (target?.ownerId) this.setUiModelVisible(target.ownerId, false);
+        });
+        this.infoCards.set(item.id, card);
+        this.root.appendChild(card);
+        return card;
+    }
+
     private updateOverlay() {
         const selected = this.items.find(item => item.id === this.selectedId);
-        const visible = this.open && Boolean(selected);
-        this.selection.classList.toggle('visible', visible);
-        this.controls.classList.toggle('visible', visible);
-        if (!selected || !visible) return;
+        const editVisible = (this.open || this.uiEditing) && Boolean(selected?.visible);
+        this.selection.classList.toggle('visible', editVisible);
+        this.controls.classList.toggle('visible', editVisible);
+
+        const itemIds = new Set(this.items.map(item => item.id));
+        this.infoCards.forEach((card, id) => {
+            if (!itemIds.has(id)) {
+                card.remove();
+                this.infoCards.delete(id);
+            }
+        });
+        this.items.forEach((item) => {
+            const infoVisible = Boolean(item.visible && (item.ownerId ||
+                (item.id === this.selectedId && (this.open || this.uiEditing))));
+            const card = infoVisible ? this.getInfoCard(item) : this.infoCards.get(item.id);
+            if (!card) return;
+            const inFront = infoVisible && this.updateInfoCard(item, card);
+            card.classList.toggle('visible', inFront);
+        });
+
+        if (!selected?.visible) {
+            this.updateStatus();
+            return;
+        }
         workPosition.set(selected.position[0], selected.position[1], selected.position[2]);
         this.scene.camera.worldToScreen(workPosition, workScreen);
         const inFront = workScreen.z >= -1 && workScreen.z <= 1;
-        this.selection.classList.toggle('visible', inFront);
+        this.selection.classList.toggle('visible', editVisible && inFront);
         this.selection.style.left = `${workScreen.x * 100}%`;
         this.selection.style.top = `${workScreen.y * 100}%`;
         this.selection.style.setProperty('--furniture-ring-scale', `${clamp(selected.scale, 0.6, 1.8)}`);
         this.updateStatus();
     }
 
+    private updateInfoCard(item: FurnitureItem, card: HTMLDivElement) {
+        const definition = catalogById.get(item.kind);
+        if (!definition) return false;
+
+        const min = item.localBound.getMin();
+        const max = item.localBound.getMax();
+        const transform = item.scaleRoot.getWorldTransform();
+
+        // This anchor is fixed in the furniture's upper-right display area.
+        // The DOM label remains
+        // upright and readable, which gives it a yaw-only billboard appearance
+        // without moving the label around the model as the camera turns.
+        workLocal.set(
+            (min.x + max.x) * 0.5 + (max.x - min.x) * 0.28,
+            min.y + (max.y - min.y) * 0.82,
+            (min.z + max.z) * 0.5
+        );
+        transform.transformPoint(workLocal, workInfoAnchor);
+        workInfoAnchor.y += 0.1;
+
+        this.scene.camera.worldToScreen(workInfoAnchor, workScreen);
+        const inFront = workScreen.z >= -1 && workScreen.z <= 1;
+        if (!inFront) return false;
+
+        const rect = this.container.getBoundingClientRect();
+        card.style.left = `${workScreen.x * rect.width}px`;
+        card.style.top = `${workScreen.y * rect.height}px`;
+        card.querySelector<HTMLElement>('.furniture-info-category').textContent =
+            `${categoryLabels[definition.category]} / 空间陈列`;
+        card.querySelector<HTMLElement>('.furniture-info-title').textContent = definition.label;
+        card.querySelector<HTMLElement>('.furniture-info-primary').textContent =
+            `原始比例 · ${Math.round(item.scale * 100)}%`;
+        card.querySelector<HTMLElement>('.furniture-info-description').textContent =
+            categoryDescriptions[definition.category];
+        card.querySelector<HTMLElement>('.furniture-info-model').textContent =
+            `MODEL · ${definition.filename.replace(/\.glb$/i, '')}`;
+        return true;
+    }
+
     private renderBounds() {
-        if (!this.open) return;
-        this.items.forEach((item) => {
+        if (!this.open && !this.uiEditing) return;
+        this.items.filter(item => item.visible).forEach((item) => {
             this.scene.app.drawWireAlignedBox(
                 item.localBound.getMin(),
                 item.localBound.getMax(),
@@ -572,7 +940,9 @@ class FurniturePlacement {
                 kind: item.kind,
                 position: [...item.position],
                 rotation: item.rotation,
-                scale: item.scale
+                scale: item.scale,
+                ownerId: item.ownerId,
+                visible: item.ownerId ? false : item.visible
             }))
         };
     }
@@ -585,9 +955,11 @@ class FurniturePlacement {
         }
         this.dirty = false;
         this.updateStatus();
+        this.events.fire('furniture.deserialized');
     }
 
     private clear(dirty: boolean) {
+        this.uiModelTargets.clear();
         this.items.forEach(item => item.entity.destroy());
         this.items = [];
         this.selectedId = null;

@@ -705,7 +705,8 @@ class Camera extends Element {
     // intersect the scene at the given normalized screen coordinate (0-1 range) using depth picking
     async intersect(x: number, y: number) {
         const { scene } = this;
-        const splats = scene.getElementsByType(ElementType.splat);
+        const splats = (scene.getElementsByType(ElementType.splat) as Splat[])
+        .filter(splat => splat.entity.enabled);
 
         let closestDepth = Infinity;
         let closestSplat: Splat | null = null;

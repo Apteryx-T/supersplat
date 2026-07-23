@@ -186,6 +186,7 @@ class Picker {
 
         // Hide non-selected elements
         const splats = scene.getElementsByType(ElementType.splat) as Splat[];
+        const enabledStates = splats.map(s => s.entity.enabled);
         splats.forEach((s) => {
             s.entity.enabled = s === splat;
         });
@@ -201,9 +202,10 @@ class Picker {
         this.renderPass.update(camera.camera, app.scene, [splatLayer], emptyMap, false);
         this.renderPass.render();
 
-        // Re-enable all splats
-        splats.forEach((s) => {
-            s.entity.enabled = true;
+        // Restore each splat's previous state so occlusion checks never reveal
+        // scene elements the user deliberately hid.
+        splats.forEach((s, index) => {
+            s.entity.enabled = enabledStates[index];
         });
     }
 
